@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-swarm"
+version = "0.1.0"
+description = "Generic, dependency-light swarm orchestration for Claude Code teammates."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+    { name = "The claude-swarm authors" },
+]
+keywords = ["claude", "agent", "swarm", "orchestration", "dag", "kanban"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+http = ["httpx>=0.27"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "build>=1.2",
+]
+
+[project.scripts]
+claude-swarm = "claude_swarm.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/kushalj1997/claude-swarm"
+Issues = "https://github.com/kushalj1997/claude-swarm/issues"
+
+[tool.setuptools.packages.find]
+include = ["claude_swarm*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+claude_swarm = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "tests/scenarios",  # binding-agnostic scenario substrate (separate workstream)
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "RUF"]
+ignore = [
+    "E501",   # line length is enforced by reviewers, not the linter
+    "N802",   # we deliberately use TitleCase factory functions for the Head roster
+    "N818",   # AbortRequested is a control-flow exception; no Error suffix
+    "UP042",  # ``str, Enum`` is broadly compatible; ``StrEnum`` is 3.11+ only
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_any_generics = true
+ignore_missing_imports = false
+exclude = [
+    # Binding-agnostic scenario substrate ships from a parallel workstream.
+    "^claude_swarm/scenarios/",
+    "^claude_swarm/cli/scenario\\.py$",
+    "^tests/scenarios/",
+]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "tests.scenarios.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --ignore=tests/scenarios"
+
+[tool.coverage.run]
+branch = true
+source = ["claude_swarm"]
+omit = [
+    # Bridges into the binding-agnostic substrate ship as a separate workstream.
+    "claude_swarm/scenarios/*",
+    "claude_swarm/cli/scenario.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
