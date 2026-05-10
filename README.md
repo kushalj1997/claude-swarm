@@ -15,6 +15,46 @@ detects file overlap and runs your test command before pushing.
 
 [Claude Code]: https://docs.claude.com/en/docs/claude-code/overview
 
+## Try it (one command — under 30 seconds, no LLM cost)
+
+```sh
+git clone https://github.com/kushalj1997/claude-swarm ~/dev/claude-swarm
+cd ~/dev/claude-swarm
+bash scripts/try-swarm.sh
+```
+
+Creates `.swarm-venv/` inside the repo, installs `claude-swarm` in editable mode + `rich` for the dashboard, bootstraps a demo swarm with a **5-task DAG** that exercises every role-typed head (Scanner → Builder → Test-Runner → Reviewer → Merger), runs the supervisor in the background, and launches a live TUI dashboard. Auto-exits cleanly when all tasks finish. Uses the `StubConductor` — no LLM calls, no cost.
+
+### What the dashboard looks like
+
+```text
+╭───────────────────────────────────────────────────────────────────────────────────────────────╮
+│ claude-swarm │ runtime: 12.3s │ supervisor turn: 3 │ cost: $0.0000 / $10.00 │ progress: 3/5 (60%) │
+╰───────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Task DAG ──────────────────────────────────────────────╮  ╭─ Heads (role-typed agents) ─────╮
+│ ID            Status        Head        Title           │  │ Head        Role     Spend      │
+├──────────────────────────────────────────────────────────┤  ├──────────────────────────────────┤
+│ 0019e1395d..  done          scanner     Scan codebase…  │  │ scanner     read-only files…  —  │
+│ 0019e1396a..  done          builder     Refactor utils… │  │ reviewer    read-only periodic—  │
+│ 0019e1397c..  in_progress   test-runner Write tests…    │  │ builder     full toolkit      —  │
+│ 0019e1398d..  done          reviewer    Periodic check… │  │ merger      bash + git only   —  │
+│ 0019e1399f..  blocked       merger      Merge clean…    │  │ test-runner read + tests      —  │
+│                                                          │  │ auditor     read-only audits  —  │
+╰──────────────────────────────────────────────────────────╯  ╰──────────────────────────────────╯
+╭─ Recent inbox ─────────────────────────────────────────────────────────────────────────────────╮
+│ scanner       2026-05-10T20:00:11  filed 3 follow-up tasks                                      │
+│ builder       2026-05-10T20:00:14  task 2 done — type hints landed, mypy clean                  │
+│ test-runner   2026-05-10T20:00:17  starting tests on branch feat/refactor-utils                 │
+│ reviewer      2026-05-10T20:00:18  checkpoint: 3/5 done, no drift, on-budget                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+The header shows live runtime, supervisor turn, cost vs cap, and overall progress. The **Task DAG** panel renders status with color (pending=yellow, blocked=magenta, in_progress=cyan, done=green, failed=red), shows which head is assigned, and surfaces blocked-by relationships. The **Heads** panel lists the role-typed subagent_types with their per-head spend. The **Recent inbox** panel tails inter-head messages so reviewers can see coordination happening in real time.
+
+For real work, swap the `StubConductor` for the included `ClaudeCLIConductor` (one-line change at supervisor construction time) and the same dashboard renders against live LLM-driven agents.
+
+---
+
 ## Install
 
 ```bash
