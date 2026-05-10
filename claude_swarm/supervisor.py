@@ -58,13 +58,22 @@ class StubConductor:
     """Default no-op conductor used by tests + the toy examples.
 
     Records the dispatch in ``calls`` and immediately marks the task done.
-    Replace with a real Claude-API or claude-CLI conductor in production.
+    Optional ``demo_delay_s`` injects an artificial sleep before each
+    dispatch so the demo dashboard has time to render progress visibly
+    (otherwise stub dispatches complete in <1ms and the run is over
+    before any UI repaints). Set to ``0`` for tests; the canonical demo
+    script defaults it to a few seconds. Replace with a real Claude-API
+    or claude-CLI conductor in production.
     """
 
     calls: list[tuple[str, str]] = field(default_factory=list)
     completion_status: TaskStatus = TaskStatus.DONE
+    demo_delay_s: float = 0.0
 
     def dispatch(self, *, head: Head, task: Task) -> DispatchResult:
+        if self.demo_delay_s > 0:
+            import time as _time
+            _time.sleep(self.demo_delay_s)
         self.calls.append((head.name, task.id))
         log.info("stub-dispatch head=%s task=%s", head.name, task.id)
         return DispatchResult(status=self.completion_status, cost_usd=0.0)
@@ -80,6 +89,8 @@ class SupervisorConfig:
     abort_root: Path | None = None
     cost_cap_usd: float = 10.0
     checkpoint: ReviewerCheckpoint = field(default_factory=ReviewerCheckpoint)
+    wait_for_work: bool = False  # when True, keep polling on empty kanban (daemon mode)
+    max_parallel: int = 1        # when >1, dispatch multiple ready tasks concurrently
 
 
 class Supervisor:
@@ -167,7 +178,14 @@ class Supervisor:
         and the abort marker. The optional ``on_idle`` callback is invoked
         when a poll finds no work; it's a hook for the caller to inject
         scanner runs, status writes, etc.
+
+        When :attr:`SupervisorConfig.max_parallel` > 1, multiple ready
+        tasks are dispatched concurrently in a thread pool. This is the
+        right setting for a "live" demo or any production swarm where
+        head dispatches are I/O-bound (subprocess calls).
         """
+        if self.config.max_parallel > 1:
+            return self._run_parallel(on_idle=on_idle)
         iterations = 0
         while True:
             if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
@@ -180,13 +198,115 @@ class Supervisor:
             if dispatched is None:
                 if on_idle is not None:
                     on_idle()
-                # Drain check: if no pending and no in-progress, done.
+                # Drain check: if no pending and no in-progress, done...
+                # ...unless wait_for_work=True (daemon mode), in which case
+                # keep polling indefinitely for newly-submitted tasks.
                 pending = self.kanban.list_tasks(status=TaskStatus.PENDING)
                 in_prog = self.kanban.list_tasks(status=TaskStatus.IN_PROGRESS)
-                if not pending and not in_prog:
+                if not pending and not in_prog and not self.config.wait_for_work:
                     return
                 time.sleep(self.config.poll_interval_s)
             iterations += 1
+
+    def _run_parallel(self, *, on_idle: Callable[[], None] | None = None) -> None:
+        """Concurrent variant of :meth:`run` using a thread pool.
+
+        Dispatches up to ``max_parallel`` tasks at a time. The kanban's
+        atomic ``claim_one()`` ensures no two threads grab the same task.
+        Each thread blocks on its conductor.dispatch() (subprocess) while
+        siblings run in parallel — exactly what makes the demo "live"
+        (multiple in-progress rows visible in the dashboard).
+        """
+        import concurrent.futures as _cf
+
+        iterations = 0
+        with _cf.ThreadPoolExecutor(max_workers=self.config.max_parallel) as pool:
+            in_flight: set[_cf.Future] = set()
+            while True:
+                if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
+                    break
+                if self._abort is not None:
+                    try:
+                        self._abort.raise_if_set()
+                    except AbortRequested:
+                        log.info("supervisor aborted via marker; exiting cleanly")
+                        break
+
+                # Submit new work up to max_parallel
+                while len(in_flight) < self.config.max_parallel:
+                    unblocked = self.kanban.unblocked(limit=1)
+                    if not unblocked:
+                        break
+                    task = unblocked[0]
+                    head = self._pick_head(task)
+                    if head is None:
+                        log.warning("no head matches required=%r for task %s", task.required_head, task.id)
+                        # Mark failed so we don't loop forever
+                        self.kanban.update(task.id, status=TaskStatus.FAILED, error="no matching head")
+                        continue
+                    claimed = self.kanban.claim_one(
+                        worker_id=f"{self.config.teammate_name}:{head.name}",
+                        required_head=task.required_head,
+                    )
+                    if claimed is None or claimed.id != task.id:
+                        # Another worker grabbed it first (shouldn't happen since we're single supervisor)
+                        continue
+                    fut = pool.submit(self._dispatch_one, head, claimed)
+                    in_flight.add(fut)
+
+                # If nothing dispatched and no work in flight, decide whether to exit or wait
+                if not in_flight:
+                    if on_idle is not None:
+                        on_idle()
+                    pending = self.kanban.list_tasks(status=TaskStatus.PENDING)
+                    in_prog = self.kanban.list_tasks(status=TaskStatus.IN_PROGRESS)
+                    if not pending and not in_prog and not self.config.wait_for_work:
+                        break
+                    time.sleep(self.config.poll_interval_s)
+                    iterations += 1
+                    continue
+
+                # Wait for at least one to finish
+                done, in_flight = _cf.wait(in_flight, timeout=self.config.poll_interval_s,
+                                            return_when=_cf.FIRST_COMPLETED)
+                for fut in done:
+                    try:
+                        fut.result()  # surface exceptions
+                    except AbortRequested:
+                        log.info("supervisor aborted via marker; exiting cleanly")
+                        return
+                    except Exception as exc:  # pylint: disable=broad-except
+                        log.exception("parallel dispatch failed: %s", exc)
+                iterations += 1
+
+    def _dispatch_one(self, head: Head, claimed: Task) -> Task:
+        """Synchronous single-task dispatch (used by parallel run)."""
+        try:
+            outcome = self.conductor.dispatch(head=head, task=claimed)
+        except AbortRequested:
+            self.kanban.transition(claimed.id, TaskStatus.PENDING, reason="aborted")
+            raise
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("conductor crashed for task %s", claimed.id)
+            self.kanban.update(
+                claimed.id,
+                status=TaskStatus.FAILED,
+                error=repr(exc),
+                completed_at=time.time(),
+            )
+            return claimed
+        self._cost_so_far_usd += outcome.cost_usd
+        self._turn += 1
+        self.kanban.update(
+            claimed.id,
+            status=outcome.status,
+            cost_usd=outcome.cost_usd,
+            result=outcome.result,
+            error=outcome.error,
+            pr_path=outcome.pr_path,
+            completed_at=time.time(),
+        )
+        return claimed
 
     # ----- introspection ---------------------------------------------
 

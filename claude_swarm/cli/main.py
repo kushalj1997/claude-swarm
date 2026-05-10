@@ -37,8 +37,63 @@ from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
 from ..merge_pipeline import run_pipeline
 from ..messaging import MessageBus
+from ..conductor import ClaudeCLIConductor
 from ..supervisor import StubConductor, Supervisor, SupervisorConfig
 from ..worktree import WorktreeManager
+
+
+def _pid_file(home: Path | None) -> Path:
+    return state_dir(home) / "supervisor.pid"
+
+
+def _daemon_log(home: Path | None) -> Path:
+    return state_dir(home) / "daemon.log"
+
+
+def _spawn_daemon_or_exit(home: Path | None) -> None:
+    """Fork once; parent prints PID + paths and exits, child continues.
+
+    Single-fork is enough for survival across shell exit on POSIX. We
+    additionally call ``os.setsid()`` in the child so the daemon detaches
+    from the controlling terminal's process group. stdin/stdout/stderr
+    are redirected to a log file under the swarm home.
+    """
+    import os
+    import sys
+
+    state_dir(home).mkdir(parents=True, exist_ok=True)
+    pidfile = _pid_file(home)
+    logfile = _daemon_log(home)
+
+    pid = os.fork()
+    if pid > 0:
+        # Parent: write the child's PID, print useful info, exit.
+        pidfile.write_text(str(pid))
+        click.echo(
+            json.dumps(
+                {
+                    "status": "daemonized",
+                    "pid": pid,
+                    "pid_file": str(pidfile),
+                    "log_file": str(logfile),
+                    "home": str(swarm_home(home)),
+                    "stop_with": f"claude-swarm daemon-stop --home {swarm_home(home)}",
+                    "status_with": f"claude-swarm daemon-status --home {swarm_home(home)}",
+                },
+                indent=2,
+            )
+        )
+        sys.exit(0)
+    # Child: detach from controlling terminal + redirect IO + run.
+    os.setsid()
+    fd_log = os.open(str(logfile), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(fd_log, sys.stdout.fileno())
+    os.dup2(fd_log, sys.stderr.fileno())
+    fd_null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(fd_null, sys.stdin.fileno())
+    os.close(fd_null)
+    if fd_log > 2:
+        os.close(fd_log)
 
 
 def _home_option(f: Any) -> Any:
@@ -257,26 +312,117 @@ def abort_check(worktree: Path, teammate: str) -> None:
 @_home_option
 @click.option("--max-iterations", default=None, type=int)
 @click.option("--poll-s", default=1.0, type=float)
+@click.option(
+    "--conductor",
+    type=click.Choice(["stub", "claude"]),
+    default="stub",
+    help="stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`.",
+)
+@click.option(
+    "--global-mind-log",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Append a JSONL event line per supervisor step (the swarm's global-mind transcript).",
+)
+@click.option(
+    "--demo-delay-s",
+    type=float,
+    default=0.0,
+    help="When conductor=stub, sleep N seconds before each dispatch so the dashboard renders visibly. 0 = instant (tests).",
+)
+@click.option(
+    "--daemon",
+    is_flag=True,
+    default=False,
+    help="Detach from the controlling terminal. Parent exits immediately; child keeps running and survives shell exit. PID + log paths printed.",
+)
+@click.option(
+    "--max-parallel",
+    type=int,
+    default=1,
+    help="Dispatch this many ready tasks concurrently (thread pool). Defaults to serial dispatch (1). Set to 3+ for a 'live' demo where multiple in-progress rows are visible simultaneously.",
+)
 def run(
     home: Path | None,
     max_iterations: int | None,
     poll_s: float,
+    conductor: str,
+    global_mind_log: Path | None,
+    demo_delay_s: float,
+    daemon: bool,
+    max_parallel: int,
 ) -> None:
-    """Run the supervisor loop with the default stub conductor.
+    """Run the supervisor loop.
 
-    Useful for tests + the toy examples; production callers wire their own
-    conductor via the Python API.
+    With ``--conductor=stub`` (default) no LLM calls are made — useful for
+    smoke tests and CI. With ``--conductor=claude`` each dispatched task
+    shells out to the ``claude`` CLI (requires the binary on PATH and an
+    authenticated session).
+
+    With ``--daemon`` the supervisor detaches from the controlling
+    terminal: parent prints the PID + log path then exits, child keeps
+    running. Stop with ``claude-swarm daemon-stop --home <path>``.
     """
+    import os as _os
+    import time as _time
+
+    if daemon:
+        _spawn_daemon_or_exit(home)
+        # The child of the fork continues below; the parent has exited.
+
     kb = Kanban(kanban_path(home))
+    cond: Any
+    if conductor == "claude":
+        # Demo path: force Haiku for fast cheap dispatch (~3-5s per task).
+        # Production callers wire ClaudeCLIConductor() with model_override=None
+        # via the Python API to use each head's role-appropriate default.
+        import os as _os
+        model_override = _os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
+        cond = ClaudeCLIConductor(model_override=model_override or None)
+    else:
+        cond = StubConductor(demo_delay_s=demo_delay_s)
     sup = Supervisor(
         kanban=kb,
         roster=default_roster(),
-        conductor=StubConductor(),
+        conductor=cond,
         config=SupervisorConfig(
             poll_interval_s=poll_s,
             max_iterations=max_iterations,
+            wait_for_work=daemon,  # daemon mode = keep polling forever
+            max_parallel=max_parallel,
         ),
     )
+
+    # Wrap step() so each dispatch emits a global-mind event line.
+    if global_mind_log is not None:
+        global_mind_log.parent.mkdir(parents=True, exist_ok=True)
+        _orig_step = sup.step
+
+        def _logged_step() -> Task | None:
+            t0 = _time.time()
+            dispatched = _orig_step()
+            if dispatched is None:
+                return None
+            try:
+                fresh = kb.get(dispatched.id)
+            except Exception:
+                fresh = dispatched
+            event = {
+                "ts": _time.time(),
+                "turn": sup._turn,
+                "task_id": dispatched.id,
+                "head": dispatched.required_head,
+                "title": dispatched.title,
+                "status": fresh.status.value if hasattr(fresh.status, "value") else str(fresh.status),
+                "elapsed_s": round(_time.time() - t0, 3),
+                "cost_so_far_usd": round(sup._cost_so_far_usd, 6),
+            }
+            with global_mind_log.open("a") as fh:
+                fh.write(json.dumps(event) + "\n")
+            return dispatched
+
+        sup.step = _logged_step  # type: ignore[method-assign]
+
     sup.run()
     click.echo(json.dumps(sup.status(), indent=2))
 
@@ -289,6 +435,90 @@ def heads() -> None:
         click.echo(
             f"{name:<14} {h.kind.value:<14} model={h.default_model:<24} {h.description}"
         )
+
+
+@main.command("daemon-status")
+@_home_option
+def daemon_status_cmd(home: Path | None) -> None:
+    """Show whether a supervisor daemon is alive for this home."""
+    import os
+
+    pidfile = _pid_file(home)
+    if not pidfile.exists():
+        click.echo(json.dumps({"alive": False, "reason": "no pid file"}, indent=2))
+        sys.exit(1)
+    try:
+        pid = int(pidfile.read_text().strip())
+    except (ValueError, OSError) as exc:
+        click.echo(json.dumps({"alive": False, "reason": f"unreadable pid file: {exc}"}, indent=2))
+        sys.exit(1)
+    try:
+        os.kill(pid, 0)  # 0 = check existence without signalling
+        alive = True
+        reason = "process responsive"
+    except ProcessLookupError:
+        alive = False
+        reason = "process not found (stale pid file)"
+    except PermissionError:
+        alive = True
+        reason = "process exists (owned by another user)"
+    click.echo(
+        json.dumps(
+            {
+                "alive": alive,
+                "pid": pid,
+                "pid_file": str(pidfile),
+                "log_file": str(_daemon_log(home)),
+                "reason": reason,
+            },
+            indent=2,
+        )
+    )
+    sys.exit(0 if alive else 1)
+
+
+@main.command("daemon-stop")
+@_home_option
+@click.option("--timeout-s", default=5.0, type=float, help="Wait this long for SIGTERM before SIGKILL.")
+def daemon_stop_cmd(home: Path | None, timeout_s: float) -> None:
+    """Send SIGTERM to the supervisor daemon; SIGKILL after timeout."""
+    import os
+    import signal
+    import time as _time
+
+    pidfile = _pid_file(home)
+    if not pidfile.exists():
+        click.echo(json.dumps({"stopped": False, "reason": "no pid file"}, indent=2))
+        sys.exit(1)
+    try:
+        pid = int(pidfile.read_text().strip())
+    except (ValueError, OSError) as exc:
+        click.echo(json.dumps({"stopped": False, "reason": f"unreadable pid file: {exc}"}, indent=2))
+        sys.exit(1)
+    # SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pidfile.unlink(missing_ok=True)
+        click.echo(json.dumps({"stopped": True, "pid": pid, "reason": "already exited"}, indent=2))
+        return
+    # Wait for clean exit
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+            _time.sleep(0.1)
+        except ProcessLookupError:
+            pidfile.unlink(missing_ok=True)
+            click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGTERM"}, indent=2))
+            return
+    # Force-kill
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    pidfile.unlink(missing_ok=True)
+    click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGKILL", "reason": "didn't exit within timeout"}, indent=2))
 
 
 if __name__ == "__main__":  # pragma: no cover

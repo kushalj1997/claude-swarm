@@ -82,14 +82,21 @@ class ClaudeCLIConductor:
 
     Each dispatch runs ``claude --print --model <model>`` with the task prompt
     on stdin. The response on stdout becomes the task ``result``.
+
+    ``model_override`` (optional) replaces the head's ``default_model`` for every
+    dispatch — useful for the demo, which uses Haiku for all heads so the
+    end-to-end run finishes in <30 seconds at minimal cost. Set to ``None`` for
+    production runs where each head's role-appropriate default applies.
     """
 
     cwd: Path | None = None
     extra_args: tuple[str, ...] = field(default_factory=tuple)
     timeout_s: int = 600
+    model_override: str | None = None
 
     def dispatch(self, *, head: Head, task: Task) -> DispatchResult:
-        cmd = ["claude", "--print", "--model", head.default_model, *self.extra_args]
+        model = self.model_override or head.default_model
+        cmd = ["claude", "--print", "--model", model, *self.extra_args]
         started = time.time()
         try:
             proc = subprocess.run(
