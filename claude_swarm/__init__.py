@@ -31,6 +31,28 @@ from .heads import (
 )
 from .kanban import Kanban, Task, TaskStatus
 from .messaging import Inbox, Message, MessageBus
+from .perpetual import (
+    CallableWorkSource,
+    DuplicateTeamError,
+    NullWorkSource,
+    PerpetualConfig,
+    PerpetualStats,
+    PerpetualSupervisor,
+    PidfileGuard,
+    WorkSource,
+    build_cached_blocks,
+    run_perpetual_team,
+)
+from .resilience import (
+    BackoffPolicy,
+    KeyRotator,
+    ResilientCallStats,
+    TransientError,
+    cache_safe_sleep,
+    classify_error,
+    resilient_call,
+    retry_after_from_headers,
+)
 from .reviewer_checkpoint import ReviewerCheckpoint
 from .supervisor import (
     Conductor,
@@ -45,17 +67,27 @@ __all__ = [
     "AbortMarker",
     "AbortRequested",
     "Auditor",
+    "BackoffPolicy",
     "Builder",
+    "CallableWorkSource",
     "Conductor",
     "DispatchResult",
+    "DuplicateTeamError",
     "Head",
     "HeadKind",
     "Inbox",
     "Kanban",
+    "KeyRotator",
     "Merger",
     "Message",
     "MessageBus",
+    "NullWorkSource",
+    "PerpetualConfig",
+    "PerpetualStats",
+    "PerpetualSupervisor",
+    "PidfileGuard",
     "PullRequest",
+    "ResilientCallStats",
     "Reviewer",
     "ReviewerCheckpoint",
     "Scanner",
@@ -65,10 +97,18 @@ __all__ = [
     "Task",
     "TaskStatus",
     "TestRunner",
+    "TransientError",
+    "WorkSource",
     "WorktreeManager",
     "abort_marker_path",
+    "build_cached_blocks",
+    "cache_safe_sleep",
     "check_abort",
+    "classify_error",
     "raise_if_aborted",
+    "resilient_call",
+    "retry_after_from_headers",
+    "run_perpetual_team",
 ]
 
 __version__ = "0.1.0"
