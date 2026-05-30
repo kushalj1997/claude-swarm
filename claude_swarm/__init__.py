@@ -19,6 +19,7 @@ from .abort import (
     check_abort,
     raise_if_aborted,
 )
+from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
     Auditor,
     Builder,
@@ -39,6 +40,13 @@ from .supervisor import (
     Supervisor,
     SupervisorConfig,
 )
+from .usage import (
+    Lane,
+    LaneState,
+    LaneView,
+    UsageSnapshot,
+    UsageTracker,
+)
 from .worktree import PullRequest, WorktreeManager
 
 __all__ = [
@@ -48,13 +56,20 @@ __all__ = [
     "Builder",
     "Conductor",
     "DispatchResult",
+    "Governor",
+    "GovernorConfig",
+    "GovernorDecision",
     "Head",
     "HeadKind",
     "Inbox",
     "Kanban",
+    "Lane",
+    "LaneState",
+    "LaneView",
     "Merger",
     "Message",
     "MessageBus",
+    "Mode",
     "PullRequest",
     "Reviewer",
     "ReviewerCheckpoint",
@@ -65,6 +80,8 @@ __all__ = [
     "Task",
     "TaskStatus",
     "TestRunner",
+    "UsageSnapshot",
+    "UsageTracker",
     "WorktreeManager",
     "abort_marker_path",
     "check_abort",

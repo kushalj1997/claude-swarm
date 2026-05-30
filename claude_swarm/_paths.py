@@ -57,7 +57,18 @@ def status_file(home: Path | None = None) -> Path:
     return state_dir(home) / "status.json"
 
 
+def usage_path(home: Path | None = None) -> Path:
+    """Per-lane usage/headroom bookkeeping for the rate governor."""
+    return state_dir(home) / "usage.json"
+
+
+def governor_path(home: Path | None = None) -> Path:
+    """Persisted auto-switch mode flag + daily API spend for the governor."""
+    return state_dir(home) / "governor.json"
+
+
 __all__ = [
+    "governor_path",
     "inboxes_dir",
     "kanban_path",
     "pull_requests_dir",
@@ -65,5 +76,6 @@ __all__ = [
     "state_dir",
     "status_file",
     "swarm_home",
+    "usage_path",
     "worktrees_dir",
 ]
