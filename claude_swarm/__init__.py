@@ -19,6 +19,13 @@ from .abort import (
     check_abort,
     raise_if_aborted,
 )
+from .bus import (
+    AgentClass,
+    Delegation,
+    DelegationStatus,
+    TaskBus,
+    validate_send,
+)
 from .heads import (
     Auditor,
     Builder,
@@ -44,9 +51,12 @@ from .worktree import PullRequest, WorktreeManager
 __all__ = [
     "AbortMarker",
     "AbortRequested",
+    "AgentClass",
     "Auditor",
     "Builder",
     "Conductor",
+    "Delegation",
+    "DelegationStatus",
     "DispatchResult",
     "Head",
     "HeadKind",
@@ -63,12 +73,14 @@ __all__ = [
     "Supervisor",
     "SupervisorConfig",
     "Task",
+    "TaskBus",
     "TaskStatus",
     "TestRunner",
     "WorktreeManager",
     "abort_marker_path",
     "check_abort",
     "raise_if_aborted",
+    "validate_send",
 ]
 
 __version__ = "0.1.0"
