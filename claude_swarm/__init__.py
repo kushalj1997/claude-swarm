@@ -19,6 +19,7 @@ from .abort import (
     check_abort,
     raise_if_aborted,
 )
+from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
     Auditor,
     Builder,
@@ -73,6 +74,13 @@ from .supervisor import (
     Supervisor,
     SupervisorConfig,
 )
+from .usage import (
+    Lane,
+    LaneState,
+    LaneView,
+    UsageSnapshot,
+    UsageTracker,
+)
 from .workflow import (
     ApiWorkflowAgent,
     Pass,
@@ -99,16 +107,23 @@ __all__ = [
     "DuplicateTeamError",
     "DynamicWorkflow",
     "EphemeralAgent",
+    "Governor",
+    "GovernorConfig",
+    "GovernorDecision",
     "Head",
     "HeadKind",
     "Inbox",
     "Kanban",
     "KeyRotator",
+    "Lane",
+    "LaneState",
+    "LaneView",
     "Lead",
     "Merger",
     "Message",
     "MessageBus",
     "MetaSupervisor",
+    "Mode",
     "NullWorkSource",
     "Pass",
     "PassResult",
@@ -134,6 +149,8 @@ __all__ = [
     "TaskStatus",
     "TestRunner",
     "TransientError",
+    "UsageSnapshot",
+    "UsageTracker",
     "WorkSource",
     "WorkflowAgent",
     "WorkflowConfig",

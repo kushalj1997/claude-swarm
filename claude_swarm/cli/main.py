@@ -24,16 +24,19 @@ import click
 
 from .. import __version__
 from .._paths import (
+    governor_path,
     inboxes_dir,
     kanban_path,
     pull_requests_dir,
     state_dir,
     status_file,
     swarm_home,
+    usage_path,
     worktrees_dir,
 )
 from ..abort import AbortMarker
 from ..conductor import ClaudeCLIConductor
+from ..governor import Governor, GovernorConfig
 from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
 from ..merge_pipeline import run_pipeline
@@ -44,6 +47,7 @@ from ..perpetual import (
     run_perpetual_team,
 )
 from ..supervisor import StubConductor, Supervisor, SupervisorConfig
+from ..usage import Lane, UsageTracker
 from ..worktree import WorktreeManager
 
 
@@ -434,6 +438,94 @@ def run(
 
     sup.run()
     click.echo(json.dumps(sup.status(), indent=2))
+
+
+def _tracker(home: Path | None) -> UsageTracker:
+    return UsageTracker(path=usage_path(home))
+
+
+def _governor(
+    home: Path | None,
+    *,
+    budget_usd: float | None = None,
+    min_dwell_s: float | None = None,
+) -> Governor:
+    base = GovernorConfig()
+    cfg = GovernorConfig(
+        api_daily_budget_usd=base.api_daily_budget_usd if budget_usd is None else budget_usd,
+        min_dwell_s=base.min_dwell_s if min_dwell_s is None else min_dwell_s,
+    )
+    return Governor(tracker=_tracker(home), config=cfg, path=governor_path(home))
+
+
+@main.group()
+def usage() -> None:
+    """Track per-lane usage headroom + drive the cheap-plan/API auto-switch."""
+
+
+@usage.command("show")
+@_home_option
+def usage_show(home: Path | None) -> None:
+    """Print a JSON snapshot of every lane's headroom + throttle state."""
+    snap = _tracker(home).snapshot()
+    click.echo(json.dumps(snap.to_dict(), indent=2))
+
+
+@usage.command("set-cap")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--tokens", required=True, type=int, help="Token cap for this lane per window.")
+def usage_set_cap(home: Path | None, lane_name: str, tokens: int) -> None:
+    """Declare a subscription lane's token cap so headroom can be computed."""
+    tracker = _tracker(home)
+    tracker.set_cap(Lane(lane_name), tokens=tokens)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("record")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--tokens", required=True, type=int)
+@click.option("--requests", default=1, type=int)
+def usage_record(home: Path | None, lane_name: str, tokens: int, requests: int) -> None:
+    """Record billable token consumption against a lane."""
+    tracker = _tracker(home)
+    tracker.record_usage(Lane(lane_name), tokens=tokens, requests=requests)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("limit")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--retry-after-s", default=None, type=float, help="Provider Retry-After seconds.")
+def usage_limit(home: Path | None, lane_name: str, retry_after_s: float | None) -> None:
+    """Record a 429 / usage-limit hit on a lane (collapses its headroom)."""
+    tracker = _tracker(home)
+    tracker.record_rate_limit(Lane(lane_name), retry_after_s=retry_after_s)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("decide")
+@_home_option
+@click.option("--budget-usd", default=None, type=float, help="Override the daily API budget cap.")
+@click.option("--add-api-spend", default=0.0, type=float, help="Record this much API spend first.")
+@click.option(
+    "--min-dwell-s",
+    default=None,
+    type=float,
+    help="Override the anti-flap dwell. Set 0 to allow an immediate transition (default 120s).",
+)
+def usage_decide(
+    home: Path | None,
+    budget_usd: float | None,
+    add_api_spend: float,
+    min_dwell_s: float | None,
+) -> None:
+    """Run the governor: print the mode + lane the dispatcher should use now."""
+    gov = _governor(home, budget_usd=budget_usd, min_dwell_s=min_dwell_s)
+    if add_api_spend > 0:
+        gov.record_api_spend(add_api_spend)
+    click.echo(json.dumps(gov.decide().to_dict(), indent=2))
 
 
 @main.command()
