@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ class ApiWorkflowAgent:
         # The SDK's Anthropic client satisfies the _MessagesClient capability
         # (it exposes a read-only ``.messages.create``). Reads the key from env;
         # never read, stored, or logged here.
-        return anthropic.Anthropic()
+        return cast(_MessagesClient, anthropic.Anthropic())
 
 
 def _extract_text(resp: object) -> str:

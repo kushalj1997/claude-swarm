@@ -92,6 +92,11 @@ disallow_untyped_defs = false
 module = "tests.scenarios.*"
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+# Optional runtime deps — imported lazily, not installed in the lint/type CI env.
+module = ["psycopg.*", "anthropic.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --ignore=tests/scenarios"

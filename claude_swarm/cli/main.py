@@ -418,7 +418,7 @@ def run(
             if dispatched is None:
                 return None
             try:
-                fresh = kb.get(dispatched.id)
+                fresh = kb.get(dispatched.id) or dispatched
             except Exception:
                 fresh = dispatched
             event = {
