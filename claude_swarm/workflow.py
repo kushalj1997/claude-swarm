@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 log = logging.getLogger(__name__)
 
@@ -239,20 +239,21 @@ class ApiWorkflowAgent:
 
     @staticmethod
     def _client() -> _MessagesClient:
-        try:
-            import anthropic  # lazy: keeps the OSS default dependency-light
-        except ImportError as exc:  # pragma: no cover - exercised only without the SDK
-            raise RuntimeError(
-                "ApiWorkflowAgent requires the 'anthropic' SDK: pip install anthropic"
-            ) from exc
+        # Check for the API key first — the most actionable error for the user.
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError(
                 "ANTHROPIC_API_KEY is not set; ApiWorkflowAgent reads it at runtime only"
             )
+        try:
+            import anthropic  # lazy: keeps the OSS default dependency-light
+        except ImportError as exc:
+            raise RuntimeError(
+                "ApiWorkflowAgent requires the 'anthropic' SDK: pip install anthropic"
+            ) from exc
         # The SDK's Anthropic client satisfies the _MessagesClient capability
         # (it exposes a read-only ``.messages.create``). Reads the key from env;
         # never read, stored, or logged here.
-        return anthropic.Anthropic()
+        return cast(_MessagesClient, anthropic.Anthropic())
 
 
 def _extract_text(resp: object) -> str:

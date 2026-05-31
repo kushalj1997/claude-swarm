@@ -15,6 +15,7 @@ forking the package.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -24,22 +25,35 @@ import click
 
 from .. import __version__
 from .._paths import (
+    governor_path,
     inboxes_dir,
     kanban_path,
     pull_requests_dir,
     state_dir,
     status_file,
     swarm_home,
+    usage_path,
     worktrees_dir,
 )
 from ..abort import AbortMarker
+from ..conductor import ClaudeCLIConductor
+from ..governor import Governor, GovernorConfig
 from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
 from ..merge_pipeline import run_pipeline
 from ..messaging import MessageBus
-from ..conductor import ClaudeCLIConductor
+from ..perpetual import (
+    PerpetualConfig,
+    PerpetualSupervisor,
+    run_perpetual_team,
+)
 from ..supervisor import StubConductor, Supervisor, SupervisorConfig
+from ..usage import Lane, UsageTracker
 from ..worktree import WorktreeManager
+
+
+def _perpetual_pidfile(home: Path | None) -> Path:
+    return state_dir(home) / "perpetual-team.pid"
 
 
 def _pid_file(home: Path | None) -> Path:
@@ -404,7 +418,7 @@ def run(
             if dispatched is None:
                 return None
             try:
-                fresh = kb.get(dispatched.id)
+                fresh = kb.get(dispatched.id) or dispatched
             except Exception:
                 fresh = dispatched
             event = {
@@ -425,6 +439,195 @@ def run(
 
     sup.run()
     click.echo(json.dumps(sup.status(), indent=2))
+
+
+def _tracker(home: Path | None) -> UsageTracker:
+    return UsageTracker(path=usage_path(home))
+
+
+def _governor(
+    home: Path | None,
+    *,
+    budget_usd: float | None = None,
+    min_dwell_s: float | None = None,
+) -> Governor:
+    base = GovernorConfig()
+    cfg = GovernorConfig(
+        api_daily_budget_usd=base.api_daily_budget_usd if budget_usd is None else budget_usd,
+        min_dwell_s=base.min_dwell_s if min_dwell_s is None else min_dwell_s,
+    )
+    return Governor(tracker=_tracker(home), config=cfg, path=governor_path(home))
+
+
+@main.group()
+def usage() -> None:
+    """Track per-lane usage headroom + drive the cheap-plan/API auto-switch."""
+
+
+@usage.command("show")
+@_home_option
+def usage_show(home: Path | None) -> None:
+    """Print a JSON snapshot of every lane's headroom + throttle state."""
+    snap = _tracker(home).snapshot()
+    click.echo(json.dumps(snap.to_dict(), indent=2))
+
+
+@usage.command("set-cap")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--tokens", required=True, type=int, help="Token cap for this lane per window.")
+def usage_set_cap(home: Path | None, lane_name: str, tokens: int) -> None:
+    """Declare a subscription lane's token cap so headroom can be computed."""
+    tracker = _tracker(home)
+    tracker.set_cap(Lane(lane_name), tokens=tokens)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("record")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--tokens", required=True, type=int)
+@click.option("--requests", default=1, type=int)
+def usage_record(home: Path | None, lane_name: str, tokens: int, requests: int) -> None:
+    """Record billable token consumption against a lane."""
+    tracker = _tracker(home)
+    tracker.record_usage(Lane(lane_name), tokens=tokens, requests=requests)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("limit")
+@_home_option
+@click.option("--lane", "lane_name", required=True, type=click.Choice([lane.value for lane in Lane]))
+@click.option("--retry-after-s", default=None, type=float, help="Provider Retry-After seconds.")
+def usage_limit(home: Path | None, lane_name: str, retry_after_s: float | None) -> None:
+    """Record a 429 / usage-limit hit on a lane (collapses its headroom)."""
+    tracker = _tracker(home)
+    tracker.record_rate_limit(Lane(lane_name), retry_after_s=retry_after_s)
+    click.echo(json.dumps(tracker.lane_view(Lane(lane_name)).to_dict(), indent=2))
+
+
+@usage.command("decide")
+@_home_option
+@click.option("--budget-usd", default=None, type=float, help="Override the daily API budget cap.")
+@click.option("--add-api-spend", default=0.0, type=float, help="Record this much API spend first.")
+@click.option(
+    "--min-dwell-s",
+    default=None,
+    type=float,
+    help="Override the anti-flap dwell. Set 0 to allow an immediate transition (default 120s).",
+)
+def usage_decide(
+    home: Path | None,
+    budget_usd: float | None,
+    add_api_spend: float,
+    min_dwell_s: float | None,
+) -> None:
+    """Run the governor: print the mode + lane the dispatcher should use now."""
+    gov = _governor(home, budget_usd=budget_usd, min_dwell_s=min_dwell_s)
+    if add_api_spend > 0:
+        gov.record_api_spend(add_api_spend)
+    click.echo(json.dumps(gov.decide().to_dict(), indent=2))
+
+
+@main.command()
+@_home_option
+@click.option("--count", default=1, type=int, help="Number of perpetual supervisors to start.")
+@click.option(
+    "--max-ticks",
+    default=None,
+    type=int,
+    help="Stop each loop after N ticks (small-batch testing). Omit for a truly perpetual loop.",
+)
+@click.option(
+    "--idle-heartbeat-s",
+    default=270.0,
+    type=float,
+    help="Sleep between ticks when the board is idle. Avoid 300 (prompt-cache TTL trap).",
+)
+@click.option(
+    "--busy-poll-s",
+    default=0.5,
+    type=float,
+    help="Sleep between ticks when work is flowing.",
+)
+@click.option(
+    "--conductor",
+    type=click.Choice(["stub", "claude"]),
+    default="stub",
+    help="stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`.",
+)
+@click.option(
+    "--no-singleton",
+    is_flag=True,
+    default=False,
+    help="Skip the OS-level pidfile guard (allows a second team — discouraged).",
+)
+def perpetual(
+    home: Path | None,
+    count: int,
+    max_ticks: int | None,
+    idle_heartbeat_s: float,
+    busy_poll_s: float,
+    conductor: str,
+    no_singleton: bool,
+) -> None:
+    """Start N never-sleep supervisors over the shared kanban.
+
+    Each loop drains ready work and, when the board is idle, would invoke its
+    work source to refill it. The built-in CLI wires the safe ``NullWorkSource``
+    (no LLM scan) so this is deterministic for smoke tests; production callers
+    supply a real scout/planner work source via the Python API
+    (:func:`claude_swarm.run_perpetual_team`).
+
+    An OS-level pidfile guard rejects a second team for the same home (the
+    single-supervisor invariant). Use ``--max-ticks`` for a bounded smoke run.
+    """
+    import os
+
+    if count < 1:
+        raise click.ClickException("--count must be >= 1")
+
+    kb = Kanban(kanban_path(home))
+    status_root = state_dir(home)
+
+    # One shared conductor for every supervisor: ClaudeCLIConductor is a
+    # stateless dataclass and StubConductor's only mutable state (its call log)
+    # is unused by the CLI, so sharing is safe and avoids constructing N copies.
+    cond: Any
+    if conductor == "claude":
+        model_override = os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
+        cond = ClaudeCLIConductor(model_override=model_override or None)
+    else:
+        cond = StubConductor()
+
+    def _factory(i: int) -> PerpetualSupervisor:
+        sup = Supervisor(
+            kanban=kb,
+            roster=default_roster(),
+            conductor=cond,
+            config=SupervisorConfig(poll_interval_s=busy_poll_s, wait_for_work=True),
+        )
+        name = "perpetual" if count == 1 else f"perpetual-{i}"
+        return PerpetualSupervisor(
+            supervisor=sup,
+            config=PerpetualConfig(
+                name=name,
+                idle_heartbeat_s=idle_heartbeat_s,
+                busy_poll_s=busy_poll_s,
+                max_ticks=max_ticks,
+                status_path=status_root / f"{name}.status.json",
+            ),
+        )
+
+    pidfile = None if no_singleton else _perpetual_pidfile(home)
+    sups = run_perpetual_team(
+        kanban=kb,
+        count=count,
+        supervisor_factory=_factory,
+        pidfile=pidfile,
+        join=True,
+    )
+    click.echo(json.dumps([s.status() for s in sups], indent=2))
 
 
 @main.command()
@@ -513,10 +716,8 @@ def daemon_stop_cmd(home: Path | None, timeout_s: float) -> None:
             click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGTERM"}, indent=2))
             return
     # Force-kill
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
     pidfile.unlink(missing_ok=True)
     click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGKILL", "reason": "didn't exit within timeout"}, indent=2))
 

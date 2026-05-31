@@ -221,7 +221,7 @@ class Supervisor:
 
         iterations = 0
         with _cf.ThreadPoolExecutor(max_workers=self.config.max_parallel) as pool:
-            in_flight: set[_cf.Future] = set()
+            in_flight: set[_cf.Future[Task]] = set()
             while True:
                 if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                     break
