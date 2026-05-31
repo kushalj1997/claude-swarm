@@ -19,6 +19,13 @@ from .abort import (
     check_abort,
     raise_if_aborted,
 )
+from .bus import (
+    AgentClass,
+    Delegation,
+    DelegationStatus,
+    TaskBus,
+    validate_send,
+)
 from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
     Auditor,
@@ -97,12 +104,15 @@ __all__ = [
     "AbortMarker",
     "AbortRequested",
     "Agent",
+    "AgentClass",
     "ApiWorkflowAgent",
     "Auditor",
     "BackoffPolicy",
     "Builder",
     "CallableWorkSource",
     "Conductor",
+    "Delegation",
+    "DelegationStatus",
     "DispatchResult",
     "DuplicateTeamError",
     "DynamicWorkflow",
@@ -146,6 +156,7 @@ __all__ = [
     "SupervisorConfig",
     "SupervisorRole",
     "Task",
+    "TaskBus",
     "TaskStatus",
     "TestRunner",
     "TransientError",
@@ -168,6 +179,7 @@ __all__ = [
     "retry_after_from_headers",
     "route_task",
     "run_perpetual_team",
+    "validate_send",
 ]
 
 __version__ = "0.1.0"
