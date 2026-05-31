@@ -36,7 +36,7 @@ from .._paths import (
     worktrees_dir,
 )
 from ..abort import AbortMarker
-from ..conductor import ClaudeCLIConductor
+from ..conductors import build_conductor
 from ..governor import Governor, GovernorConfig
 from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
@@ -47,7 +47,7 @@ from ..perpetual import (
     PerpetualSupervisor,
     run_perpetual_team,
 )
-from ..supervisor import StubConductor, Supervisor, SupervisorConfig
+from ..supervisor import Supervisor, SupervisorConfig
 from ..usage import Lane, UsageTracker
 from ..worktree import WorktreeManager
 
@@ -328,9 +328,13 @@ def abort_check(worktree: Path, teammate: str) -> None:
 @click.option("--poll-s", default=1.0, type=float)
 @click.option(
     "--conductor",
-    type=click.Choice(["stub", "claude"]),
+    type=click.Choice(["stub", "claude", "api", "sdk"]),
     default="stub",
-    help="stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`.",
+    help=(
+        "stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`; "
+        "api = Anthropic Messages API direct (requires anthropic package + ANTHROPIC_API_KEY); "
+        "sdk = claude-agent-sdk query() (requires claude-agent-sdk + ANTHROPIC_API_KEY)."
+    ),
 )
 @click.option(
     "--global-mind-log",
@@ -385,16 +389,15 @@ def run(
         # The child of the fork continues below; the parent has exited.
 
     kb = Kanban(kanban_path(home))
-    cond: Any
-    if conductor == "claude":
-        # Demo path: force Haiku for fast cheap dispatch (~3-5s per task).
-        # Production callers wire ClaudeCLIConductor() with model_override=None
-        # via the Python API to use each head's role-appropriate default.
-        import os as _os
-        model_override = _os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
-        cond = ClaudeCLIConductor(model_override=model_override or None)
-    else:
-        cond = StubConductor(demo_delay_s=demo_delay_s)
+    # Demo path: force Haiku for fast cheap dispatch (~3-5s per task).
+    # Production callers wire conductors via the Python API to use each
+    # head's role-appropriate default (set CLAUDE_SWARM_MODEL_OVERRIDE="").
+    model_override = _os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
+    cond = build_conductor(
+        conductor,
+        model_override=model_override or None,
+        demo_delay_s=demo_delay_s,
+    )
     sup = Supervisor(
         kanban=kb,
         roster=default_roster(),
@@ -552,9 +555,13 @@ def usage_decide(
 )
 @click.option(
     "--conductor",
-    type=click.Choice(["stub", "claude"]),
+    type=click.Choice(["stub", "claude", "api", "sdk"]),
     default="stub",
-    help="stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`.",
+    help=(
+        "stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`; "
+        "api = Anthropic Messages API direct (requires anthropic package + ANTHROPIC_API_KEY); "
+        "sdk = claude-agent-sdk query() (requires claude-agent-sdk + ANTHROPIC_API_KEY)."
+    ),
 )
 @click.option(
     "--no-singleton",
@@ -590,15 +597,15 @@ def perpetual(
     kb = Kanban(kanban_path(home))
     status_root = state_dir(home)
 
-    # One shared conductor for every supervisor: ClaudeCLIConductor is a
-    # stateless dataclass and StubConductor's only mutable state (its call log)
-    # is unused by the CLI, so sharing is safe and avoids constructing N copies.
-    cond: Any
-    if conductor == "claude":
-        model_override = os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
-        cond = ClaudeCLIConductor(model_override=model_override or None)
-    else:
-        cond = StubConductor()
+    # One shared conductor for every supervisor: all conductor types are
+    # stateless dataclasses (or treat their mutable state as private),
+    # so sharing across N supervisors is safe and avoids constructing N copies.
+    model_override = os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
+    cond = build_conductor(
+        conductor,
+        model_override=model_override or None,
+        demo_delay_s=0.0,
+    )
 
     def _factory(i: int) -> PerpetualSupervisor:
         sup = Supervisor(

@@ -26,6 +26,8 @@ from .bus import (
     TaskBus,
     validate_send,
 )
+from .conductors import ApiConductor, SDKConductor, build_conductor
+from .cost import MODEL_ALIASES, MODEL_PRICING, ModelPrice, price_call, resolve_model
 from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
     Auditor,
@@ -101,10 +103,13 @@ from .workflow import (
 from .worktree import PullRequest, WorktreeManager
 
 __all__ = [
+    "MODEL_ALIASES",
+    "MODEL_PRICING",
     "AbortMarker",
     "AbortRequested",
     "Agent",
     "AgentClass",
+    "ApiConductor",
     "ApiWorkflowAgent",
     "Auditor",
     "BackoffPolicy",
@@ -134,6 +139,7 @@ __all__ = [
     "MessageBus",
     "MetaSupervisor",
     "Mode",
+    "ModelPrice",
     "NullWorkSource",
     "Pass",
     "PassResult",
@@ -149,6 +155,7 @@ __all__ = [
     "RoleKind",
     "Route",
     "RoutingDecision",
+    "SDKConductor",
     "Scanner",
     "StubConductor",
     "StubWorkflowAgent",
@@ -170,12 +177,15 @@ __all__ = [
     "WorktreeManager",
     "abort_marker_path",
     "build_cached_blocks",
+    "build_conductor",
     "cache_safe_sleep",
     "check_abort",
     "classify_error",
     "default_ladder",
+    "price_call",
     "raise_if_aborted",
     "resilient_call",
+    "resolve_model",
     "retry_after_from_headers",
     "route_task",
     "run_perpetual_team",
