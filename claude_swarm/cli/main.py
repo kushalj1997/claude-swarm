@@ -33,13 +33,22 @@ from .._paths import (
     worktrees_dir,
 )
 from ..abort import AbortMarker
+from ..conductor import ClaudeCLIConductor
 from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
 from ..merge_pipeline import run_pipeline
 from ..messaging import MessageBus
-from ..conductor import ClaudeCLIConductor
+from ..perpetual import (
+    PerpetualConfig,
+    PerpetualSupervisor,
+    run_perpetual_team,
+)
 from ..supervisor import StubConductor, Supervisor, SupervisorConfig
 from ..worktree import WorktreeManager
+
+
+def _perpetual_pidfile(home: Path | None) -> Path:
+    return state_dir(home) / "perpetual-team.pid"
 
 
 def _pid_file(home: Path | None) -> Path:
@@ -425,6 +434,107 @@ def run(
 
     sup.run()
     click.echo(json.dumps(sup.status(), indent=2))
+
+
+@main.command()
+@_home_option
+@click.option("--count", default=1, type=int, help="Number of perpetual supervisors to start.")
+@click.option(
+    "--max-ticks",
+    default=None,
+    type=int,
+    help="Stop each loop after N ticks (small-batch testing). Omit for a truly perpetual loop.",
+)
+@click.option(
+    "--idle-heartbeat-s",
+    default=270.0,
+    type=float,
+    help="Sleep between ticks when the board is idle. Avoid 300 (prompt-cache TTL trap).",
+)
+@click.option(
+    "--busy-poll-s",
+    default=0.5,
+    type=float,
+    help="Sleep between ticks when work is flowing.",
+)
+@click.option(
+    "--conductor",
+    type=click.Choice(["stub", "claude"]),
+    default="stub",
+    help="stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`.",
+)
+@click.option(
+    "--no-singleton",
+    is_flag=True,
+    default=False,
+    help="Skip the OS-level pidfile guard (allows a second team — discouraged).",
+)
+def perpetual(
+    home: Path | None,
+    count: int,
+    max_ticks: int | None,
+    idle_heartbeat_s: float,
+    busy_poll_s: float,
+    conductor: str,
+    no_singleton: bool,
+) -> None:
+    """Start N never-sleep supervisors over the shared kanban.
+
+    Each loop drains ready work and, when the board is idle, would invoke its
+    work source to refill it. The built-in CLI wires the safe ``NullWorkSource``
+    (no LLM scan) so this is deterministic for smoke tests; production callers
+    supply a real scout/planner work source via the Python API
+    (:func:`claude_swarm.run_perpetual_team`).
+
+    An OS-level pidfile guard rejects a second team for the same home (the
+    single-supervisor invariant). Use ``--max-ticks`` for a bounded smoke run.
+    """
+    import os
+
+    if count < 1:
+        raise click.ClickException("--count must be >= 1")
+
+    kb = Kanban(kanban_path(home))
+    status_root = state_dir(home)
+
+    # One shared conductor for every supervisor: ClaudeCLIConductor is a
+    # stateless dataclass and StubConductor's only mutable state (its call log)
+    # is unused by the CLI, so sharing is safe and avoids constructing N copies.
+    cond: Any
+    if conductor == "claude":
+        model_override = os.environ.get("CLAUDE_SWARM_MODEL_OVERRIDE", "claude-haiku-4-5")
+        cond = ClaudeCLIConductor(model_override=model_override or None)
+    else:
+        cond = StubConductor()
+
+    def _factory(i: int) -> PerpetualSupervisor:
+        sup = Supervisor(
+            kanban=kb,
+            roster=default_roster(),
+            conductor=cond,
+            config=SupervisorConfig(poll_interval_s=busy_poll_s, wait_for_work=True),
+        )
+        name = "perpetual" if count == 1 else f"perpetual-{i}"
+        return PerpetualSupervisor(
+            supervisor=sup,
+            config=PerpetualConfig(
+                name=name,
+                idle_heartbeat_s=idle_heartbeat_s,
+                busy_poll_s=busy_poll_s,
+                max_ticks=max_ticks,
+                status_path=status_root / f"{name}.status.json",
+            ),
+        )
+
+    pidfile = None if no_singleton else _perpetual_pidfile(home)
+    sups = run_perpetual_team(
+        kanban=kb,
+        count=count,
+        supervisor_factory=_factory,
+        pidfile=pidfile,
+        join=True,
+    )
+    click.echo(json.dumps([s.status() for s in sups], indent=2))
 
 
 @main.command()
