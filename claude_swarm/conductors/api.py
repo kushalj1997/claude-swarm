@@ -18,7 +18,6 @@ Deferred to Phase 6 (noted in PR):
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +47,13 @@ def _mark_cache_prefix(
     Ported from deep-ai worker.py:1407-1428 (cache marker helper).
     The ``ttl`` values ``"5m"`` and ``"1h"`` map to Anthropic's ephemeral
     cache tiers; use ``"1h"`` for the system prompt (stable across turns).
+
+    Note: the package also exports ``build_cached_blocks`` (perpetual.py:179)
+    which marks the LAST non-empty block and accepts ``(label, text)`` tuples.
+    This helper is intentionally different — it marks the FIRST *count* blocks
+    operating on pre-built block dicts, which is the right primitive for the
+    system-prompt cache-marker pattern used here.  A future consolidation
+    should generalise one of the two helpers rather than forking further.
     """
     marked: list[dict[str, Any]] = []
     for i, blk in enumerate(blocks):
@@ -58,13 +64,17 @@ def _mark_cache_prefix(
 
 
 def _extract_text(content: list[Any]) -> str:
-    """Pull the concatenated text from a list of Anthropic content blocks."""
+    """Pull the concatenated text from a list of Anthropic SDK content blocks.
+
+    Only processes the object form produced by ``anthropic.Anthropic().messages.create()``;
+    ``response.content`` is always a list of typed SDK objects (TextBlock,
+    ToolUseBlock, etc.), never plain dicts.
+    """
     parts: list[str] = []
     for blk in content:
-        # Support both SDK objects (blk.type / blk.text) and plain dicts.
-        blk_type = getattr(blk, "type", None) or (blk.get("type") if isinstance(blk, dict) else None)
+        blk_type = getattr(blk, "type", None)
         if blk_type == "text":
-            text = getattr(blk, "text", None) or (blk.get("text") if isinstance(blk, dict) else None)
+            text = getattr(blk, "text", None)
             if text:
                 parts.append(str(text))
     return "\n".join(parts)
@@ -82,12 +92,16 @@ class ApiConductor:
         experimenting).
     cost_cap_usd:
         Hard per-task cost cap.  When the accumulated cost of API calls for
-        a *single* dispatch reaches or exceeds this value the conductor raises
-        ``RuntimeError("hard_cost_cap_exceeded: ...")``.  The supervisor
-        catches this at ``supervisor.py:153`` and marks the task ``FAILED``.
-        A plain ``RuntimeError`` is deliberate — ``AbortRequested`` would
-        re-queue to ``PENDING`` (supervisor.py:149-151), looping forever on a
-        task that always over-runs.
+        a *single* dispatch reaches or exceeds this value *and* the current
+        turn is still in a tool-use loop (about to make another API call),
+        the conductor returns
+        ``DispatchResult(status=FAILED, error="hard_cost_cap_exceeded", cost_usd=running_cost)``.
+        A completed ``end_turn`` response is NEVER discarded by this cap —
+        if the final turn tips the cost over, the result is returned as DONE
+        with the accumulated cost recorded.  Using ``DispatchResult`` rather
+        than raising ``RuntimeError`` ensures the supervisor's normal path
+        writes ``cost_usd`` to the kanban row (the generic-exception path at
+        ``supervisor.py:152-159`` does not record cost).
     cwd:
         Working directory hint (unused by the API path today; reserved for
         future tool-registry integration).
@@ -103,16 +117,15 @@ class ApiConductor:
     # ------------------------------------------------------------------
 
     def dispatch(self, *, head: Head, task: Task) -> DispatchResult:
-        """Run *head* against *task* via the Anthropic Messages API."""
-        return asyncio.run(self._run(head, task))
-
-    async def _run(self, head: Head, task: Task) -> DispatchResult:
+        """Run *head* against *task* via the Anthropic Messages API (synchronous)."""
         import anthropic  # lazy — optional dep; mypy override in pyproject.toml
 
         client = anthropic.Anthropic()
         model = self.model_override or head.default_model
 
-        # Build the system block list with cache markers on the leading block.
+        # Build the system block list with a 1h cache marker on the leading block.
+        # 1h TTL is correct for the system prompt: it is stable across turns and
+        # the 1h tier (e.g. $10/M for Opus) is distinctly priced from the 5m tier.
         system_blocks: list[dict[str, Any]] = [
             {"type": "text", "text": head.system_prompt},
         ]
@@ -126,6 +139,9 @@ class ApiConductor:
         running_cost: float = 0.0
         final_text: str = ""
         turn = 0
+        # Tracks whether the loop exited via the normal end_turn break vs
+        # exhausting the turn budget while still in a tool-use loop.
+        completed = False
 
         while turn < task.max_turns:
             turn += 1
@@ -141,13 +157,34 @@ class ApiConductor:
             response = client.messages.create(**kwargs)
 
             # Accumulate cost from this response.
+            # Route cache-creation tokens to the 1h dimension because the
+            # system prompt is marked with ttl="1h" above.  The Anthropic API
+            # reports the per-TTL breakdown in usage.cache_creation.ephemeral_1h_input_tokens
+            # / ephemeral_5m_input_tokens (anthropic>=0.39); the flat
+            # cache_creation_input_tokens is the sum of both.  Since this
+            # conductor only writes a 1h cache entry we route the entire flat
+            # aggregate to cache_write_1h_tokens (the 5m dimension stays 0).
             usage = response.usage
+            # Attempt to read the split breakdown if the SDK provides it;
+            # fall back to the flat aggregate attributed to 1h.
+            cache_creation = getattr(usage, "cache_creation", None)
+            cache_write_1h: int
+            cache_write_5m: int
+            if cache_creation is not None:
+                _1h = getattr(cache_creation, "ephemeral_1h_input_tokens", None)
+                cache_write_1h = int(_1h) if _1h is not None else getattr(usage, "cache_creation_input_tokens", 0)
+                cache_write_5m = int(getattr(cache_creation, "ephemeral_5m_input_tokens", 0))
+            else:
+                cache_write_1h = getattr(usage, "cache_creation_input_tokens", 0)
+                cache_write_5m = 0
+
             turn_cost = price_call(
                 model,
                 input_tokens=getattr(usage, "input_tokens", 0),
                 output_tokens=getattr(usage, "output_tokens", 0),
                 cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0),
-                cache_write_5m_tokens=getattr(usage, "cache_creation_input_tokens", 0),
+                cache_write_1h_tokens=cache_write_1h,
+                cache_write_5m_tokens=cache_write_5m,
             )
             running_cost += turn_cost
 
@@ -161,22 +198,42 @@ class ApiConductor:
                 running_cost,
             )
 
-            # Hard cost cap — raise a plain RuntimeError so the supervisor
-            # marks the task FAILED rather than re-queueing (AbortRequested
-            # triggers a re-queue via supervisor.py:149-151).
-            if running_cost >= self.cost_cap_usd:
-                raise RuntimeError(
-                    f"hard_cost_cap_exceeded: running=${running_cost:.4f}"
-                    f" >= cap=${self.cost_cap_usd:.4f}"
-                    f" (head={head.name} task={task.id} model={model})"
-                )
-
             stop_reason: str = getattr(response, "stop_reason", "") or ""
 
             if stop_reason != "tool_use":
                 # End of turn — extract the text and return.
+                # The cost cap is NOT checked here: a completed end_turn
+                # response must always be returned with its result; discarding
+                # a finished answer because its cost crossed the cap is the
+                # wrong behaviour (see bug fix audit finding #2/#6).
                 final_text = _extract_text(response.content)
+                completed = True
                 break
+
+            # Hard cost cap — evaluated ONLY in the tool-use path, i.e. when
+            # we are about to make another API call.  Checking here (not before
+            # the stop_reason branch) ensures a completed end_turn turn whose
+            # cost tips the cap is still returned as DONE, not silently discarded.
+            # We return a DispatchResult rather than raising so the supervisor's
+            # normal code path records cost_usd on the kanban row.
+            if running_cost >= self.cost_cap_usd:
+                log.warning(
+                    "api-dispatch cost cap exceeded head=%s task=%s running=%.4f cap=%.4f",
+                    head.name,
+                    task.id,
+                    running_cost,
+                    self.cost_cap_usd,
+                )
+                return DispatchResult(
+                    status=TaskStatus.FAILED,
+                    result=final_text or None,
+                    error=(
+                        f"hard_cost_cap_exceeded: running=${running_cost:.4f}"
+                        f" >= cap=${self.cost_cap_usd:.4f}"
+                        f" (head={head.name} task={task.id} model={model})"
+                    ),
+                    cost_usd=running_cost,
+                )
 
             # Tool-use loop: append assistant content + synthesised tool
             # results, then loop back.
@@ -201,6 +258,26 @@ class ApiConductor:
                         }
                     )
             messages.append({"role": "user", "content": tool_results})
+
+        # If the loop exited by turn-budget exhaustion (not via the end_turn
+        # break), the task never produced a final answer — report FAILED so
+        # the supervisor does NOT cascade-unblock dependent tasks with a
+        # spurious DONE/result=None.  The cost so far is recorded so the
+        # kanban row has an accurate cost_usd.
+        if not completed:
+            log.warning(
+                "api-dispatch max_turns exhausted head=%s task=%s turns=%d cost_usd=%.4f",
+                head.name,
+                task.id,
+                turn,
+                running_cost,
+            )
+            return DispatchResult(
+                status=TaskStatus.FAILED,
+                result=None,
+                error=f"max_turns ({task.max_turns}) exhausted in tool loop without end_turn",
+                cost_usd=running_cost,
+            )
 
         log.info(
             "api-dispatch done head=%s task=%s turns=%d cost_usd=%.4f",

@@ -34,6 +34,8 @@ def _make_usage(
     u.output_tokens = output_tokens
     u.cache_read_input_tokens = cache_read_input_tokens
     u.cache_creation_input_tokens = cache_creation_input_tokens
+    # No split cache_creation breakdown by default (flat only).
+    u.cache_creation = None
     return u
 
 
@@ -110,9 +112,15 @@ class TestApiConductorHappyPath:
                 task=Task(title="t", prompt="hello"),
             )
 
-        # Sonnet: input=$3/M, output=$15/M; 100 input + 50 output = (300+750)/1e6
+        # Sonnet: input=$3/M, output=$15/M; 100 input + 50 output = (300+750)/1e6.
+        # cache_creation_input_tokens=0, cache_read_input_tokens=0 by default.
         expected = (100 * 3.0 + 50 * 15.0) / 1_000_000
         assert result.cost_usd == pytest.approx(expected, rel=1e-4)
+
+    def test_dispatch_is_synchronous(self) -> None:
+        """dispatch() must be synchronous (no asyncio.run overhead)."""
+        import inspect
+        assert not inspect.iscoroutinefunction(ApiConductor.dispatch)
 
 
 class TestApiConductorToolLoop:
@@ -153,39 +161,175 @@ class TestApiConductorToolLoop:
         per_turn = (100 * 3.0 + 50 * 15.0) / 1_000_000
         assert result.cost_usd == pytest.approx(2 * per_turn, rel=1e-4)
 
+    def test_max_turns_exhaustion_returns_failed(self) -> None:
+        """When tool_use loops exhaust max_turns, return FAILED not DONE.
+
+        Bug: without the completed-flag guard, the while loop exits by guard
+        condition and falls through to the unconditional DONE return, marking
+        the task DONE with result=None — a silent false success that cascades
+        unblocking of DAG-dependent tasks.
+        """
+        # Every response is tool_use so the loop never hits the end_turn branch.
+        always_tool = _make_response("tool_use", tools=[_tool_use_block()])
+        fake_anthropic = _make_fake_anthropic([always_tool] * 5)
+
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            cond = ApiConductor(model_override="claude-haiku-4-5")
+            result = cond.dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="loop forever", max_turns=3),
+            )
+
+        assert result.status is TaskStatus.FAILED
+        assert result.result is None
+        assert result.error is not None
+        assert "max_turns" in result.error
+        assert "(3)" in result.error
+        # Cost for 3 turns must be recorded (not 0) so the kanban ledger is accurate.
+        assert result.cost_usd > 0.0
+        # Exactly max_turns API calls were made.
+        assert fake_anthropic.Anthropic().messages.create.call_count == 3
+
 
 class TestApiConductorCostCap:
-    def test_cost_cap_raises_runtime_error(self) -> None:
-        """When running_cost >= cap, raise RuntimeError (not AbortRequested).
+    def test_cost_cap_in_tool_loop_returns_failed(self) -> None:
+        """Cost cap fires only inside the tool-use loop (not on end_turn).
 
-        RuntimeError is caught at supervisor.py:153 → FAILED.
-        AbortRequested would re-queue → infinite retry for an always-overrun task.
+        When running_cost >= cap AND the current response is tool_use (about
+        to make another API call), the conductor returns FAILED — not raises —
+        so the supervisor's normal path writes cost_usd to the kanban row.
         """
         # Set a very low cap so even one turn exceeds it.
-        fake_anthropic = _make_fake_anthropic([_make_response("end_turn", "x")])
+        tool_resp = _make_response("tool_use", tools=[_tool_use_block()])
+        # Only one response — the cap fires after processing the first tool_use turn.
+        fake_anthropic = _make_fake_anthropic([tool_resp])
 
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             cond = ApiConductor(model_override="claude-sonnet-4-6", cost_cap_usd=0.000001)
-            with pytest.raises(RuntimeError, match="hard_cost_cap_exceeded"):
-                cond.dispatch(
-                    head=Builder(),
-                    task=Task(title="t", prompt="y"),
-                )
+            result = cond.dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="y"),
+            )
 
-    def test_cost_cap_is_not_abort_requested(self) -> None:
-        """Verify the exception is NOT AbortRequested (which would loop forever)."""
-        from claude_swarm.abort import AbortRequested
+        assert result.status is TaskStatus.FAILED
+        assert result.error is not None
+        assert "hard_cost_cap_exceeded" in result.error
+        # Cost must be recorded on the DispatchResult so the supervisor writes it.
+        assert result.cost_usd > 0.0
 
-        fake_anthropic = _make_fake_anthropic([_make_response("end_turn", "x")])
+    def test_cost_cap_does_not_discard_end_turn_result(self) -> None:
+        """A completed end_turn response is NEVER discarded by the cost cap.
+
+        Bug: the original implementation checked the cap unconditionally before
+        the stop_reason branch, so a successful end_turn turn whose cost crossed
+        the cap raised RuntimeError and threw away the finished answer.
+        """
+        # A single end_turn response — set a cap so low any cost exceeds it.
+        end_resp = _make_response("end_turn", "the final answer")
+        fake_anthropic = _make_fake_anthropic([end_resp])
 
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             cond = ApiConductor(model_override="claude-sonnet-4-6", cost_cap_usd=0.000001)
+            result = cond.dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="z"),
+            )
+
+        # The completed answer must be returned as DONE regardless of the cap.
+        assert result.status is TaskStatus.DONE
+        assert result.result == "the final answer"
+        assert result.cost_usd > 0.0
+
+    def test_cost_cap_does_not_raise_runtime_error(self) -> None:
+        """The cap must return DispatchResult(FAILED), not raise RuntimeError.
+
+        RuntimeError on the exception path in supervisor.py:152-159 does NOT
+        record cost_usd — using DispatchResult ensures the normal kanban.update
+        path fires and cost is preserved.
+        """
+        tool_resp = _make_response("tool_use", tools=[_tool_use_block()])
+        fake_anthropic = _make_fake_anthropic([tool_resp])
+
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            cond = ApiConductor(model_override="claude-sonnet-4-6", cost_cap_usd=0.000001)
+            # Must NOT raise any exception.
             try:
-                cond.dispatch(head=Builder(), task=Task(title="t", prompt="z"))
-            except RuntimeError:
-                pass  # expected
-            except AbortRequested:
-                pytest.fail("Cost cap must raise RuntimeError, not AbortRequested")
+                result = cond.dispatch(head=Builder(), task=Task(title="t", prompt="z"))
+            except Exception as exc:  # pylint: disable=broad-except
+                pytest.fail(f"dispatch() raised unexpectedly: {exc!r}")
+            assert result.status is TaskStatus.FAILED
+
+
+class TestApiConductorCacheTokenPricing:
+    def test_cache_creation_tokens_priced_as_1h(self) -> None:
+        """Cache-creation tokens from a 1h-TTL system prompt must use the 1h price.
+
+        Bug: the original code passed cache_creation_input_tokens to the 5m
+        dimension of price_call, under-pricing 1h cache writes by ~37% (Opus).
+        """
+        from claude_swarm.cost import MODEL_PRICING
+
+        # Build a response where 1000 tokens were written to cache.
+        resp = MagicMock()
+        resp.stop_reason = "end_turn"
+        resp.content = [_text_block("ok")]
+        usage = MagicMock()
+        usage.input_tokens = 0
+        usage.output_tokens = 0
+        usage.cache_read_input_tokens = 0
+        usage.cache_creation_input_tokens = 1000  # flat aggregate
+        usage.cache_creation = None  # no split breakdown (flat only)
+        resp.usage = usage
+
+        fake_anthropic = _make_fake_anthropic([resp])
+
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            cond = ApiConductor(model_override="claude-opus-4-8")
+            result = cond.dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="cache test"),
+            )
+
+        # 1000 tokens at the 1h rate ($10/M for Opus-4-8).
+        price = MODEL_PRICING["claude-opus-4-8"]
+        expected_1h = 1000 * price.cache_write_1h / 1_000_000
+        wrong_5m = 1000 * price.cache_write_5m / 1_000_000
+        assert result.cost_usd == pytest.approx(expected_1h, rel=1e-4), (
+            f"Expected 1h price {expected_1h:.8f}, got {result.cost_usd:.8f} "
+            f"(5m wrong price would be {wrong_5m:.8f})"
+        )
+
+    def test_cache_creation_tokens_split_breakdown_preferred(self) -> None:
+        """When the SDK provides per-TTL breakdown, each bucket uses its own rate."""
+        from claude_swarm.cost import MODEL_PRICING
+
+        resp = MagicMock()
+        resp.stop_reason = "end_turn"
+        resp.content = [_text_block("ok")]
+        usage = MagicMock()
+        usage.input_tokens = 0
+        usage.output_tokens = 0
+        usage.cache_read_input_tokens = 0
+        usage.cache_creation_input_tokens = 1500  # sum of both tiers
+        # Simulate the SDK breakdown (anthropic >= 0.39)
+        cache_creation = MagicMock()
+        cache_creation.ephemeral_1h_input_tokens = 1000
+        cache_creation.ephemeral_5m_input_tokens = 500
+        usage.cache_creation = cache_creation
+        resp.usage = usage
+
+        fake_anthropic = _make_fake_anthropic([resp])
+
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            cond = ApiConductor(model_override="claude-opus-4-8")
+            result = cond.dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="split cache test"),
+            )
+
+        price = MODEL_PRICING["claude-opus-4-8"]
+        expected = (1000 * price.cache_write_1h + 500 * price.cache_write_5m) / 1_000_000
+        assert result.cost_usd == pytest.approx(expected, rel=1e-4)
 
 
 class TestApiConductorErrorPropagation:
