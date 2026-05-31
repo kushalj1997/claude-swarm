@@ -23,14 +23,14 @@ known surface. No schema migration required when the binary catches up.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-import time
 import tempfile
-from dataclasses import dataclass, field, asdict
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 SCHEMA_VERSION = 1
 """Bumped on any breaking change to :class:`AgentState`.
@@ -143,10 +143,8 @@ def _atomic_write(path: Path, payload: str) -> None:
             fh.write(payload)
         os.replace(tmp, path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -222,13 +220,13 @@ def record_dispatch(team_root: Path, name: str, *, task_id: str, pid: int | None
 
 
 __all__ = [
-    "AgentState",
     "SCHEMA_VERSION",
+    "AgentState",
     "agents_dir",
-    "register",
+    "deregister",
     "get",
     "list_all",
-    "restore",
-    "deregister",
     "record_dispatch",
+    "register",
+    "restore",
 ]

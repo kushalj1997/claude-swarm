@@ -15,6 +15,7 @@ forking the package.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -715,10 +716,8 @@ def daemon_stop_cmd(home: Path | None, timeout_s: float) -> None:
             click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGTERM"}, indent=2))
             return
     # Force-kill
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
     pidfile.unlink(missing_ok=True)
     click.echo(json.dumps({"stopped": True, "pid": pid, "method": "SIGKILL", "reason": "didn't exit within timeout"}, indent=2))
 
