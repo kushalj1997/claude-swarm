@@ -195,13 +195,9 @@ class PostgresBus:
     """
 
     def __init__(self, dsn: str, *, auto_migrate: bool = True) -> None:
-        try:
-            import psycopg  # noqa: F401 — presence check; imported per-call below
-        except ImportError as exc:  # pragma: no cover — exercised via extra
-            raise ImportError(
-                "PostgresBus requires psycopg; install with "
-                "`pip install \"claude-swarm[postgres]\"`"
-            ) from exc
+        # psycopg is NOT imported here — importing this module must never fail
+        # just because psycopg is absent (the test_postgres_bus_import_does_not_
+        # require_db contract). The ImportError surfaces on first connect() call.
         self._dsn = _plain_dsn(dsn)
         self._auto_migrate = auto_migrate
         self._migrated = False
@@ -215,7 +211,13 @@ class PostgresBus:
         ``coord_db`` — the constraint-widening only expands the accepted value
         set; it never narrows or drops data.
         """
-        import psycopg
+        try:
+            import psycopg
+        except ImportError as exc:
+            raise ImportError(
+                "PostgresBus requires psycopg; install with "
+                "`pip install \"claude-swarm[postgres]\"`"
+            ) from exc
 
         with psycopg.connect(self._dsn, autocommit=True) as conn:
             conn.execute(_DDL_TABLE)
@@ -232,9 +234,14 @@ class PostgresBus:
             self.ensure_schema()
 
     def _connect(self) -> psycopg.Connection[dict[str, Any]]:
-        import psycopg
-        from psycopg.rows import dict_row
-
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError(
+                "PostgresBus requires psycopg; install with "
+                "`pip install \"claude-swarm[postgres]\"`"
+            ) from exc
         return psycopg.connect(self._dsn, row_factory=dict_row)
 
     # ----- send paths -------------------------------------------------
