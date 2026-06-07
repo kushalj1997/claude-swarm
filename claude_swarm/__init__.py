@@ -26,7 +26,8 @@ from .bus import (
     TaskBus,
     validate_send,
 )
-from .conductors import ApiConductor, SDKConductor, build_conductor
+from .conductors import DEFAULT_CONDUCTOR, ApiConductor, SDKConductor, build_conductor
+from .github_tasks import GitHubWorkSource
 from .cost import MODEL_ALIASES, MODEL_PRICING, ModelPrice, price_call, resolve_model
 from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
@@ -111,6 +112,8 @@ __all__ = [
     "AgentClass",
     "ApiConductor",
     "ApiWorkflowAgent",
+    "DEFAULT_CONDUCTOR",
+    "GitHubWorkSource",
     "Auditor",
     "BackoffPolicy",
     "Builder",
