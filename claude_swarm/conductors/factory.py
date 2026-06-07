@@ -22,6 +22,7 @@ import warnings
 from ..conductor import ClaudeCLIConductor
 from ..supervisor import Conductor, StubConductor
 from .api import ApiConductor
+from .env import MissingAnthropicApiKeyError, require_anthropic_api_key
 from .sdk import SDKConductor
 
 log = logging.getLogger(__name__)
@@ -65,15 +66,16 @@ def build_conductor(
         For an unrecognised *name* (shouldn't happen when called from a
         ``click.Choice``-validated CLI option, but guards programmatic use).
     """
-    import os
-
     if name == "stub":
         return StubConductor(demo_delay_s=demo_delay_s)
     if name == "claude":
+        import os
+
         if not os.environ.get("CLAUDE_SWARM_ALLOW_CLI_CONDUCTOR"):
             warnings.warn(_CLI_DEPRECATION_MSG, DeprecationWarning, stacklevel=2)
         return ClaudeCLIConductor(model_override=model_override)
     if name == "api":
+        require_anthropic_api_key()
         return ApiConductor(model_override=model_override)
     if name == "sdk":
         return SDKConductor(model_override=model_override)
@@ -82,4 +84,9 @@ def build_conductor(
     )
 
 
-__all__ = ["DEFAULT_CONDUCTOR", "build_conductor"]
+__all__ = [
+    "DEFAULT_CONDUCTOR",
+    "MissingAnthropicApiKeyError",
+    "build_conductor",
+    "require_anthropic_api_key",
+]

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +29,7 @@ from .abort import AbortMarker, AbortRequested
 from .heads import Head, default_roster
 from .kanban import Kanban, Task, TaskStatus
 from .messaging import MessageBus
+from .meta_supervisor import cost_preflight
 from .reviewer_checkpoint import ReviewerCheckpoint
 
 log = logging.getLogger(__name__)
@@ -126,6 +127,56 @@ class Supervisor:
             return h
         return self.roster.get("builder")
 
+    def _preflight_before_claim(self, *, head: Head, task: Task) -> bool:
+        """Return True when *task* may be claimed."""
+
+        preflight_task = task
+        if "cost_cap_usd" not in task.metadata:
+            preflight_task = replace(
+                task,
+                metadata={**task.metadata, "cost_cap_usd": self.config.cost_cap_usd},
+            )
+        verdict = cost_preflight(preflight_task, head_name=head.name)
+        if verdict.verdict == "REJECT":
+            log.warning(
+                "cost preflight rejected task=%s head=%s reason=%s",
+                task.id,
+                head.name,
+                verdict.reason,
+            )
+            self.kanban.update(
+                task.id,
+                status=TaskStatus.FAILED,
+                error=f"cost_preflight_rejected: {verdict.reason}",
+                completed_at=time.time(),
+                reason="cost_preflight:reject",
+            )
+            return False
+        if verdict.verdict == "HOLD":
+            log.warning(
+                "cost preflight hold admitted task=%s head=%s reason=%s",
+                task.id,
+                head.name,
+                verdict.reason,
+            )
+
+        conductor_preflight = getattr(self.conductor, "preflight", None)
+        if callable(conductor_preflight):
+            outcome = conductor_preflight(head=head, task=task)
+            if outcome is not None:
+                self.kanban.update(
+                    task.id,
+                    status=outcome.status,
+                    cost_usd=outcome.cost_usd,
+                    result=outcome.result,
+                    error=outcome.error,
+                    pr_path=outcome.pr_path,
+                    completed_at=time.time(),
+                    reason="conductor_preflight",
+                )
+                return False
+        return True
+
     def step(self) -> Task | None:
         """Run a single supervisor iteration. Returns the dispatched task."""
         if self._abort is not None:
@@ -137,6 +188,8 @@ class Supervisor:
         head = self._pick_head(task)
         if head is None:
             log.warning("no head matches required=%r for task %s", task.required_head, task.id)
+            return None
+        if not self._preflight_before_claim(head=head, task=task):
             return None
         claimed = self.kanban.claim_one(
             worker_id=f"{self.config.teammate_name}:{head.name}",
@@ -243,6 +296,8 @@ class Supervisor:
                         log.warning("no head matches required=%r for task %s", task.required_head, task.id)
                         # Mark failed so we don't loop forever
                         self.kanban.update(task.id, status=TaskStatus.FAILED, error="no matching head")
+                        continue
+                    if not self._preflight_before_claim(head=head, task=task):
                         continue
                     claimed = self.kanban.claim_one(
                         worker_id=f"{self.config.teammate_name}:{head.name}",

@@ -63,6 +63,38 @@ def test_failed_dispatch_marks_task_failed(kanban: Kanban) -> None:
     assert len(pending) == 1
 
 
+def test_cost_preflight_rejects_before_claim(kanban: Kanban) -> None:
+    task = kanban.submit(Task(title="costly", prompt="x", metadata={"cost_cap_usd": 0.01}))
+    calls = StubConductor()
+    sup = Supervisor(kanban=kanban, conductor=calls)
+
+    dispatched = sup.step()
+
+    fresh = kanban.get(task.id)
+    assert dispatched is None
+    assert fresh is not None
+    assert fresh.status is TaskStatus.FAILED
+    assert "cost_preflight" in (fresh.error or "")
+    assert calls.calls == []
+    timeline_statuses = [row["to_status"] for row in kanban.timeline(task.id)]
+    assert timeline_statuses == [TaskStatus.PENDING.value, TaskStatus.FAILED.value]
+
+
+def test_cost_preflight_hold_still_dispatches(kanban: Kanban) -> None:
+    task = kanban.submit(Task(title="near cap", prompt="x", metadata={"cost_cap_usd": 0.06}))
+    calls = StubConductor()
+    sup = Supervisor(kanban=kanban, conductor=calls)
+
+    dispatched = sup.step()
+
+    fresh = kanban.get(task.id)
+    assert dispatched is not None
+    assert dispatched.id == task.id
+    assert fresh is not None
+    assert fresh.status is TaskStatus.DONE
+    assert calls.calls == [("builder", task.id)]
+
+
 def test_required_head_dispatch(kanban: Kanban) -> None:
     bld = kanban.submit(Task(title="b", prompt="b", required_head="builder"))
     rev = kanban.submit(Task(title="r", prompt="r", required_head="reviewer"))

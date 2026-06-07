@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kushal.claude-swarm-perpetual</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CLAUDE_SWARM_BIN__</string>
+    <string>perpetual</string>
+    <string>--home</string>
+    <string>__CLAUDE_SWARM_HOME__</string>
+    <string>--count</string>
+    <string>1</string>
+    <string>--conductor</string>
+    <string>api</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__AGENT_SWARM_REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_SWARM_HOME</key>
+    <string>__CLAUDE_SWARM_HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/claude-swarm-perpetual.out</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/claude-swarm-perpetual.err</string>
+</dict>
+</plist>

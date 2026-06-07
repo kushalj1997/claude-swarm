@@ -12,6 +12,11 @@ from claude_swarm.conductors.sdk import SDKConductor
 from claude_swarm.supervisor import StubConductor
 
 
+@pytest.fixture(autouse=True)
+def fake_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only-not-a-real-key")
+
+
 class TestDefaultConductorIsAPIBased:
     """A: DEFAULT_CONDUCTOR must resolve to the Anthropic Messages API backend.
 
@@ -118,6 +123,16 @@ class TestBuildConductorRouting:
         cond = build_conductor("api", model_override="claude-sonnet-4-6")
         assert isinstance(cond, ApiConductor)
         assert cond.model_override == "claude-sonnet-4-6"
+
+    def test_api_requires_anthropic_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            build_conductor("api", model_override=None)
+
+    def test_api_rejects_blank_anthropic_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "  ")
+        with pytest.raises(RuntimeError, match="blank"):
+            build_conductor("api", model_override=None)
 
     def test_sdk_returns_sdk_conductor(self) -> None:
         cond = build_conductor("sdk", model_override=None)
