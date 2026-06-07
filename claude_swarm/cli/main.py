@@ -8,7 +8,7 @@ Subcommands:
     inbox        send / receive directed messages
     merge        run the auto-merge pipeline
     abort        set/clear an abort marker
-    run          run the supervisor loop (with the stub conductor by default)
+    run          run the supervisor loop (api conductor by default)
 
 Designed so a downstream plugin can wrap or extend each subcommand without
 forking the package.
@@ -36,7 +36,7 @@ from .._paths import (
     worktrees_dir,
 )
 from ..abort import AbortMarker
-from ..conductors import build_conductor
+from ..conductors import DEFAULT_CONDUCTOR, build_conductor
 from ..governor import Governor, GovernorConfig
 from ..heads import default_roster
 from ..kanban import Kanban, Task, TaskStatus
@@ -329,11 +329,13 @@ def abort_check(worktree: Path, teammate: str) -> None:
 @click.option(
     "--conductor",
     type=click.Choice(["stub", "claude", "api", "sdk"]),
-    default="stub",
+    default=DEFAULT_CONDUCTOR,
+    show_default=True,
     help=(
-        "stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`; "
-        "api = Anthropic Messages API direct (requires anthropic package + ANTHROPIC_API_KEY); "
-        "sdk = claude-agent-sdk query() (requires claude-agent-sdk + ANTHROPIC_API_KEY)."
+        "stub = no LLM calls (CI/test); "
+        "api = Anthropic Messages API (default; requires ANTHROPIC_API_KEY); "
+        "sdk = claude-agent-sdk query() (requires ANTHROPIC_API_KEY); "
+        "claude = DEPRECATED `claude --print` CLI (metered from June 15 2026)."
     ),
 )
 @click.option(
@@ -372,10 +374,10 @@ def run(
 ) -> None:
     """Run the supervisor loop.
 
-    With ``--conductor=stub`` (default) no LLM calls are made — useful for
-    smoke tests and CI. With ``--conductor=claude`` each dispatched task
-    shells out to the ``claude`` CLI (requires the binary on PATH and an
-    authenticated session).
+    Default conductor is ``api`` — dispatches via the Anthropic Messages API
+    (requires ``ANTHROPIC_API_KEY``). Use ``--conductor=stub`` for smoke tests
+    and CI (no LLM calls). ``--conductor=claude`` is deprecated: the ``claude
+    --print`` CLI is metered from June 15 2026 and may incur unexpected costs.
 
     With ``--daemon`` the supervisor detaches from the controlling
     terminal: parent prints the PID + log path then exits, child keeps
@@ -556,11 +558,13 @@ def usage_decide(
 @click.option(
     "--conductor",
     type=click.Choice(["stub", "claude", "api", "sdk"]),
-    default="stub",
+    default=DEFAULT_CONDUCTOR,
+    show_default=True,
     help=(
-        "stub = no LLM calls (deterministic); claude = real dispatch via `claude --print`; "
-        "api = Anthropic Messages API direct (requires anthropic package + ANTHROPIC_API_KEY); "
-        "sdk = claude-agent-sdk query() (requires claude-agent-sdk + ANTHROPIC_API_KEY)."
+        "stub = no LLM calls (CI/test); "
+        "api = Anthropic Messages API (default; requires ANTHROPIC_API_KEY); "
+        "sdk = claude-agent-sdk query() (requires ANTHROPIC_API_KEY); "
+        "claude = DEPRECATED `claude --print` CLI (metered from June 15 2026)."
     ),
 )
 @click.option(
