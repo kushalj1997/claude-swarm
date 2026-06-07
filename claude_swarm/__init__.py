@@ -19,6 +19,13 @@ from .abort import (
     check_abort,
     raise_if_aborted,
 )
+from .autoresearch_ingest import (
+    AutoresearchChunkingPolicy,
+    AutoresearchIngestRequest,
+    AutoresearchIngestResult,
+    build_autoresearch_ingest_requests,
+    merge_autoresearch_ingest_results,
+)
 from .bus import (
     AgentClass,
     Delegation,
@@ -106,6 +113,9 @@ __all__ = [
     "Agent",
     "AgentClass",
     "ApiWorkflowAgent",
+    "AutoresearchChunkingPolicy",
+    "AutoresearchIngestRequest",
+    "AutoresearchIngestResult",
     "Auditor",
     "BackoffPolicy",
     "Builder",
@@ -169,11 +179,13 @@ __all__ = [
     "WorkflowRunner",
     "WorktreeManager",
     "abort_marker_path",
+    "build_autoresearch_ingest_requests",
     "build_cached_blocks",
     "cache_safe_sleep",
     "check_abort",
     "classify_error",
     "default_ladder",
+    "merge_autoresearch_ingest_results",
     "raise_if_aborted",
     "resilient_call",
     "retry_after_from_headers",

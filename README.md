@@ -96,6 +96,23 @@ claude-swarm run --max-iterations 10
 claude-swarm status
 ```
 
+## Source-only autoresearch ingest
+
+The optional `claude_swarm.autoresearch_ingest` helpers prepare a deep-ai
+autoresearch acceptance package for a later approved provider batch without
+running that provider. Use `build_autoresearch_ingest_requests` to turn source
+evidence into provider-neutral request rows with stable `custom_id` values,
+source labels, artifact provenance, claim caveats, and static chunking policy.
+Request metadata also keeps Ark-family alias fields such as
+`canonical_model_id`, `display_model_id`, `display_model_alias`, and `alias_*`
+safety caveats directly available while preserving the nested evidence contract.
+Use `merge_autoresearch_ingest_results` to fold approved result rows back into
+the package's `provider_batch` summary while keeping `publish_safe=false`,
+`protected_runtime_verified=false`, and source-only caveats intact.
+
+No provider/API calls, Files API uploads, runtime probes, or publication claims
+are performed by these helpers.
+
 ## Architecture
 
 ```text
