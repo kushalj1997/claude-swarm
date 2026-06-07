@@ -19,6 +19,12 @@ from claude_swarm.conductors.api import ApiConductor, _mark_cache_prefix
 from claude_swarm.heads import Builder
 from claude_swarm.kanban import Task, TaskStatus
 
+
+@pytest.fixture(autouse=True)
+def fake_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only-not-a-real-key")
+
+
 # ---------------------------------------------------------------------------
 # Helpers — fake Anthropic response objects
 # ---------------------------------------------------------------------------
@@ -333,6 +339,23 @@ class TestApiConductorCacheTokenPricing:
 
 
 class TestApiConductorErrorPropagation:
+    def test_missing_api_key_fails_before_client_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        fake_anthropic = _make_fake_anthropic([_make_response("end_turn", "unused")])
+
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            result = ApiConductor(model_override="claude-haiku-4-5").dispatch(
+                head=Builder(),
+                task=Task(title="t", prompt="x"),
+            )
+
+        assert result.status is TaskStatus.FAILED
+        assert result.error is not None
+        assert "ANTHROPIC_API_KEY" in result.error
+        fake_anthropic.Anthropic.assert_not_called()
+
     def test_api_error_propagates(self) -> None:
         """If messages.create() raises, the exception propagates to the supervisor."""
         fake_anthropic = _make_fake_anthropic(ValueError("API error"))

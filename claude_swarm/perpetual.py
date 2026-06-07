@@ -122,7 +122,20 @@ def _drive_claimed_task(*, supervisor: Supervisor, **_extra: Any) -> Task | None
     ready = kb.unblocked(limit=1)
     if not ready:
         return None
-    required_head = ready[0].required_head
+    task = ready[0]
+    required_head = task.required_head
+    head = supervisor._pick_head(task)
+    if head is None:
+        log.warning("no head matches required=%r for task %s", task.required_head, task.id)
+        kb.update(
+            task.id,
+            status=TaskStatus.FAILED,
+            error="no matching head",
+            completed_at=time.time(),
+        )
+        return None
+    if not supervisor._preflight_before_claim(head=head, task=task):
+        return None
     claimed = kb.claim_one(
         worker_id=f"{teammate}:{required_head}",
         required_head=required_head,

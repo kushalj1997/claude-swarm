@@ -137,6 +137,24 @@ def test_verify_exception_does_not_crash_loop(kanban: Kanban) -> None:
     assert worked is True
 
 
+def test_tick_cost_preflight_rejects_before_claim(kanban: Kanban) -> None:
+    task = kanban.submit(Task(title="costly", prompt="x", metadata={"cost_cap_usd": 0.01}))
+    calls = StubConductor()
+    loop = PerpetualSupervisor(supervisor=_supervisor(kanban, conductor=calls))
+
+    worked = loop.tick()
+
+    fresh = kanban.get(task.id)
+    assert worked is False
+    assert loop.stats.dispatched == 0
+    assert fresh is not None
+    assert fresh.status is TaskStatus.FAILED
+    assert "cost_preflight" in (fresh.error or "")
+    assert calls.calls == []
+    timeline_statuses = [row["to_status"] for row in kanban.timeline(task.id)]
+    assert timeline_statuses == [TaskStatus.PENDING.value, TaskStatus.FAILED.value]
+
+
 # ----- the perpetual loop ---------------------------------------------
 
 

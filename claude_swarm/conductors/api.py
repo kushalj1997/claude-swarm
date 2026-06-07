@@ -27,6 +27,7 @@ from ..cost import price_call
 from ..heads import Head
 from ..kanban import Task, TaskStatus
 from ..supervisor import DispatchResult
+from .env import MissingAnthropicApiKeyError, require_anthropic_api_key
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,10 @@ class ApiConductor:
 
     def dispatch(self, *, head: Head, task: Task) -> DispatchResult:
         """Run *head* against *task* via the Anthropic Messages API (synchronous)."""
+        preflight = self.preflight(head=head, task=task)
+        if preflight is not None:
+            return preflight
+
         import anthropic  # lazy — optional dep; mypy override in pyproject.toml
 
         client = anthropic.Anthropic()
@@ -291,6 +296,25 @@ class ApiConductor:
             result=final_text or None,
             cost_usd=running_cost,
         )
+
+    def preflight(self, *, head: Head, task: Task) -> DispatchResult | None:
+        """Return a failure result when the API conductor is not ready.
+
+        Supervisors call this before claiming a task; direct ``dispatch()``
+        callers get the same fail-fast behavior before any client is built.
+        """
+
+        del head, task
+        try:
+            require_anthropic_api_key()
+        except MissingAnthropicApiKeyError as exc:
+            log.error("api-dispatch refused before client construction: %s", exc)
+            return DispatchResult(
+                status=TaskStatus.FAILED,
+                error=str(exc),
+                cost_usd=0.0,
+            )
+        return None
 
     def _tools(self) -> list[dict[str, Any]]:
         """Return the tool-spec list for the API call.

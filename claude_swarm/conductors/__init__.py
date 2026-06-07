@@ -12,12 +12,15 @@ installed — the optional deps are imported lazily inside each conductor's
 from __future__ import annotations
 
 from .api import ApiConductor
+from .env import MissingAnthropicApiKeyError, require_anthropic_api_key
 from .factory import DEFAULT_CONDUCTOR, build_conductor
 from .sdk import SDKConductor
 
 __all__ = [
-    "ApiConductor",
     "DEFAULT_CONDUCTOR",
+    "ApiConductor",
+    "MissingAnthropicApiKeyError",
     "SDKConductor",
     "build_conductor",
+    "require_anthropic_api_key",
 ]
