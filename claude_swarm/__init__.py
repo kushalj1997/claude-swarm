@@ -27,6 +27,7 @@ from .bus import (
     validate_send,
 )
 from .conductors import DEFAULT_CONDUCTOR, ApiConductor, SDKConductor, build_conductor
+from .coord_bus_adapter import CoordBusAdapter, CoordMessage
 from .github_tasks import GitHubWorkSource
 from .meta_supervisor import (
     AnomalyTracker,
@@ -120,6 +121,8 @@ __all__ = [
     "AgentClass",
     "AnomalyTracker",
     "ApiConductor",
+    "CoordBusAdapter",
+    "CoordMessage",
     "ApiWorkflowAgent",
     "DEFAULT_CONDUCTOR",
     "GitHubWorkSource",
