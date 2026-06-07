@@ -28,6 +28,14 @@ from .bus import (
 )
 from .conductors import DEFAULT_CONDUCTOR, ApiConductor, SDKConductor, build_conductor
 from .github_tasks import GitHubWorkSource
+from .meta_supervisor import (
+    AnomalyTracker,
+    MetaSupervisorMonitor,
+    PreflightVerdict,
+    SupervisorHealthEvent,
+    cost_preflight,
+    parallelism_score,
+)
 from .cost import MODEL_ALIASES, MODEL_PRICING, ModelPrice, price_call, resolve_model
 from .governor import Governor, GovernorConfig, GovernorDecision, Mode
 from .heads import (
@@ -110,10 +118,16 @@ __all__ = [
     "AbortRequested",
     "Agent",
     "AgentClass",
+    "AnomalyTracker",
     "ApiConductor",
     "ApiWorkflowAgent",
     "DEFAULT_CONDUCTOR",
     "GitHubWorkSource",
+    "MetaSupervisorMonitor",
+    "PreflightVerdict",
+    "SupervisorHealthEvent",
+    "cost_preflight",
+    "parallelism_score",
     "Auditor",
     "BackoffPolicy",
     "Builder",
