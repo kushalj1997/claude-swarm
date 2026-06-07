@@ -78,7 +78,7 @@ def test_run_drains_with_stub(tmp_path: Path, monkeypatch) -> None:  # type: ign
     runner = CliRunner()
     runner.invoke(main, ["init"])
     runner.invoke(main, ["submit", "--title", "t", "--prompt", "p"])
-    r = runner.invoke(main, ["run", "--max-iterations", "5"])
+    r = runner.invoke(main, ["run", "--conductor", "stub", "--max-iterations", "5"])
     assert r.exit_code == 0
     snap = json.loads(r.output)
     assert snap["kanban"]["done"] >= 1
